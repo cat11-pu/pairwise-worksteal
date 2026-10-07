@@ -157,7 +157,6 @@ class WorkStealingScheduler:
             task = self._pop_local(worker)
             self._execute(worker, task)
             return self._record(worker, RUN, task)
-        self.idle_ticks += 1
         victim = self._pick_victim(wid)
         if victim is not None:
             moved = self._steal_from(worker, victim)
@@ -165,6 +164,7 @@ class WorkStealingScheduler:
                 task = self._pop_local(worker)
                 self._execute(worker, task)
                 return self._record(worker, STEAL, task, victim.wid)
+        self.idle_ticks += 1
         return self._record(worker, IDLE, None)
 
     def run(self, max_steps=DEFAULT_MAX_STEPS):
@@ -233,39 +233,41 @@ class WorkStealingScheduler:
 
     def _enqueue(self, task):
         """把任务放进本地队列尾部。"""
-        self.workers[self._cursor].deque.append(task)
+        self.workers[task.worker].deque.append(task)
 
     def _publish_ready(self):
         """把依赖已经满足的任务放进就绪队列。"""
         for task in self.tasks.values():
             if task.state is not PENDING:
                 continue
-            if not any(self.tasks[dep].state is DONE for dep in task.deps):
+            if not self._deps_done(task):
                 continue
             task.state = READY
             self._enqueue(task)
 
     def _pop_local(self, worker):
         """执行者从本地队列里取出下一个要跑的任务。"""
-        return worker.deque.popleft()
+        return worker.deque.pop()
 
     def _pick_victim(self, wid):
         """找一个本地队列非空的受害者。"""
-        victim = self.workers[(wid + 1) % len(self.workers)]
-        if victim.deque:
-            return victim
+        count = len(self.workers)
+        for offset in range(1, count):
+            victim = self.workers[(wid + offset) % count]
+            if victim.deque:
+                return victim
         return None
 
     def _steal_count(self, size):
         """一次窃取搬走的任务数：一半向上取整。"""
-        return size // 2
+        return (size + 1) // 2
 
     def _steal_from(self, thief, victim):
         """从 victim 队首搬走一半任务，放到 thief 的队尾。"""
         count = self._steal_count(len(victim.deque))
         moved = []
         for _ in range(count):
-            moved.append(victim.deque.pop())
+            moved.append(victim.deque.popleft())
         if not moved:
             return moved
         thief.deque.extend(moved)
@@ -276,11 +278,11 @@ class WorkStealingScheduler:
         return moved
 
     def _execute(self, worker, task):
-        """执行一个单位的工作，并把工作量记到任务归属执行者名下。"""
+        """执行一个单位的工作，并把工作量记到实际执行的执行者名下。"""
         task.state = RUNNING
         task.remaining -= 1
         task.executions += 1
-        self.workers[task.worker].executed += 1
+        worker.executed += 1
         self.busy_ticks += 1
         if task.remaining > 0:
             task.state = READY
